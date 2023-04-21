@@ -16,7 +16,7 @@
 
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from synapse.api.errors import InvalidAPICallError, SynapseError
 from synapse.http.server import HttpServer
@@ -284,26 +284,64 @@ class OneTimeKeyServlet(RestServlet):
         super().__init__()
         self.auth = hs.get_auth()
         self.e2e_keys_handler = hs.get_e2e_keys_handler()
-        self._always_include_fallback_keys = False
 
     async def on_POST(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
         await self.auth.get_user_by_req(request, allow_guest=True)
         timeout = parse_integer(request, "timeout", 10 * 1000)
         body = parse_json_object_from_request(request)
+
+        # Map the legacy request to the new request format.
+        query: Dict[str, Dict[str, Dict[str, int]]] = {}
+        for user_id, one_time_keys in body.get("one_time_keys", {}).items():
+            for device_id, algorithm in one_time_keys.items():
+                query.setdefault(user_id, {})[device_id] = {algorithm: 1}
+
         result = await self.e2e_keys_handler.claim_one_time_keys(
-            body,
-            timeout,
-            always_include_fallback_keys=self._always_include_fallback_keys,
+            query, timeout, always_include_fallback_keys=False
         )
         return 200, result
 
 
-class UnstableOneTimeKeyServlet(OneTimeKeyServlet):
+class UnstableOneTimeKeyServlet(RestServlet):
+    """
+    POST /keys/claim HTTP/1.1
+    {
+      "one_time_keys": {
+        "<user_id>": {
+          "<device_id>": {
+            "<algorithm>": <count>
+    } } } }
+
+    HTTP/1.1 200 OK
+    {
+      "one_time_keys": {
+        "<user_id>": {
+          "<device_id>": {
+            "<algorithm>:<key_id>": "<key_base64>"
+    } } } }
+
+    """
+
     PATTERNS = [re.compile(r"^/_matrix/client/unstable/org.matrix.msc3983/keys/claim$")]
+    CATEGORY = "Encryption requests"
 
     def __init__(self, hs: "HomeServer"):
-        super().__init__(hs)
-        self._always_include_fallback_keys = True
+        super().__init__()
+        self.auth = hs.get_auth()
+        self.e2e_keys_handler = hs.get_e2e_keys_handler()
+
+    async def on_POST(self, request: SynapseRequest) -> Tuple[int, JsonDict]:
+        await self.auth.get_user_by_req(request, allow_guest=True)
+        timeout = parse_integer(request, "timeout", 10 * 1000)
+        body = parse_json_object_from_request(request)
+
+        query = body.get("one_time_keys", {})
+        result = await self.e2e_keys_handler.claim_one_time_keys(
+            query,
+            timeout,
+            always_include_fallback_keys=True,
+        )
+        return 200, result
 
 
 class SigningKeyUploadServlet(RestServlet):
